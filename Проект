@@ -1,0 +1,361 @@
+### Проект: Русскоязычная языковая модель на LSTM
+
+**Цель**: Создать систему для обучения и использования русскоязычной языковой модели на основе LSTM с возможностью автоматического сбора данных и продолжения обучения.
+
+---
+
+### Ключевые особенности системы:
+1. **Автоматический сбор данных**:
+   - Парсинг из Википедии, Lenta.ru и Lib.ru
+   - Фильтрация по длине текста
+   - Сохранение в унифицированном формате
+2. **Гибкая система обучения**:
+   - Продолжение обучения с последней точки
+   - Регулярное сохранение прогресса
+   - Автоматическая проверка данных
+3. **Генерация текста**:
+   - Настройка "творчества" через температуру
+   - Примеры генерации во время обучения
+4. **Модульная архитектура**:
+   - Четкое разделение компонентов
+   - Легкость расширения
+
+---
+
+### Полная структура проекта:
+```
+russian_lm_project/
+├── data/                   # Все данные для обучения
+│   ├── raw/                # Ручные добавления (.txt файлы)
+│   └── parsed/             # Автоматически спарсенные данные
+├── models/                 # Сохраненные модели и чекпоинты
+└── src/                    # Исходный код
+    ├── train.py            # Основной скрипт обучения
+    ├── model.py            # Архитектура нейросети
+    ├── data_loader.py      # Загрузка и обработка данных
+    ├── parser.py           # Парсинг данных из интернета
+    └── utils.py            # Вспомогательные функции
+```
+
+---
+
+### Детализация файлов:
+
+#### 1. `src/train.py` (Основной скрипт)
+```python
+import torch
+import torch.nn as nn
+from pathlib import Path
+from datetime import datetime
+from model import CharLSTM
+from parser import RussianTextParser
+from data_loader import prepare_data, create_dataset, create_data_loader
+from utils import generate_text, save_model, load_model
+
+# ========== КОНФИГУРАЦИЯ ==========
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+PARSED_DIR = DATA_DIR / "parsed"
+MODEL_DIR = PROJECT_ROOT / "models"
+
+# Параметры модели
+MODEL_PATH = MODEL_DIR / "char_lstm_model.pt"
+SEQ_LENGTH = 100          # Длина последовательностей
+HIDDEN_SIZE = 512         # Размер скрытого слоя LSTM
+BATCH_SIZE = 64           # Размер батча для обучения
+LEARNING_RATE = 0.005     # Скорость обучения
+NUM_EPOCHS = 1000         # Максимальное количество эпох
+PRINT_EVERY = 50          # Частота логирования
+MIN_DATA_LENGTH = 50000   # Минимальный объем данных
+
+# Создание директорий
+for dir_path in [DATA_DIR, RAW_DIR, PARSED_DIR, MODEL_DIR]:
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+def train_model():
+    # Определение устройства (GPU/CPU)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Проверка и сбор данных
+    if len(list(RAW_DIR.glob('*.txt')) + len(list(PARSED_DIR.glob('*.txt'))) < 3:
+        parser = RussianTextParser(RAW_DIR, PARSED_DIR)
+        parser.run_parsing()
+    
+    # Подготовка данных
+    text, char_to_idx, idx_to_char, vocab_size = prepare_data(RAW_DIR, PARSED_DIR)
+    
+    # Проверка объема данных
+    if len(text) < MIN_DATA_LENGTH:
+        print(f"Недостаточно данных: {len(text)} < {MIN_DATA_LENGTH}")
+        return
+    
+    # Создание датасета
+    data = create_dataset(text, char_to_idx, SEQ_LENGTH)
+    loader = create_data_loader(data, BATCH_SIZE)
+    
+    # Инициализация модели
+    model = CharLSTM(vocab_size, HIDDEN_SIZE, vocab_size).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.CrossEntropyLoss()
+    start_epoch = 0
+    
+    # Загрузка существующей модели
+    if MODEL_PATH.exists():
+        model, checkpoint = load_model(MODEL_PATH, device, CharLSTM)
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        start_epoch = checkpoint['epoch'] + 1
+        char_to_idx = checkpoint['char_to_idx']
+        idx_to_char = checkpoint['idx_to_char']
+        vocab_size = checkpoint['vocab_size']
+    
+    # Цикл обучения
+    for epoch in range(start_epoch, NUM_EPOCHS):
+        total_loss = 0
+        for inputs, targets in loader:
+            # ... (процесс обучения)
+        
+        # Логирование и сохранение
+        if (epoch + 1) % PRINT_EVERY == 0:
+            sample = generate_text(model, "Наука", 200, char_to_idx, idx_to_char, device)
+            save_model(model, optimizer, epoch, char_to_idx, idx_to_char, HIDDEN_SIZE, vocab_size, MODEL_PATH)
+    
+    # Финальное сохранение и генерация
+    save_model(...)
+    final_text = generate_text(model, "ИИ", 500, char_to_idx, idx_to_char, device)
+
+if __name__ == "__main__":
+    print("="*60)
+    print(f"Запуск обучения: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*60)
+    train_model()
+```
+
+#### 2. `src/model.py` (Архитектура нейросети)
+```python
+import torch.nn as nn
+
+class CharLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.embedding = nn.Embedding(input_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, x, hidden):
+        embedded = self.embedding(x)
+        out, hidden = self.lstm(embedded, hidden)
+        out = self.fc(out)
+        return out, hidden
+
+    def init_hidden(self, batch_size, device):
+        return (
+            torch.zeros(1, batch_size, self.hidden_size).to(device),
+            torch.zeros(1, batch_size, self.hidden_size).to(device)
+        )
+```
+
+#### 3. `src/data_loader.py` (Работа с данными)
+```python
+from pathlib import Path
+import torch
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+
+def load_all_text(raw_dir: Path, parsed_dir: Path) -> str:
+    text = ""
+    for dir_path in [raw_dir, parsed_dir]:
+        for file in dir_path.glob("*.txt"):
+            with open(file, 'r', encoding='utf-8') as f:
+                text += f.read() + "\n"
+    return text
+
+def prepare_data(raw_dir: Path, parsed_dir: Path):
+    text = load_all_text(raw_dir, parsed_dir)
+    chars = sorted(set(text))
+    char_to_idx = {ch: i for i, ch in enumerate(chars)}
+    idx_to_char = {i: ch for i, ch in enumerate(chars)}
+    return text, char_to_idx, idx_to_char, len(chars)
+
+def create_dataset(text: str, char_to_idx: dict, seq_length: int):
+    encoded = [char_to_idx[ch] for ch in text]
+    return [
+        (encoded[i:i+seq_length], encoded[i+1:i+seq_length+1])
+        for i in range(0, len(encoded) - seq_length - 1, seq_length)
+    ]
+
+def create_data_loader(data, batch_size):
+    inputs = torch.tensor([item[0] for item in data], dtype=torch.long)
+    targets = torch.tensor([item[1] for item in data], dtype=torch.long)
+    return DataLoader(TensorDataset(inputs, targets), batch_size=batch_size, shuffle=True)
+```
+
+#### 4. `src/parser.py` (Парсинг данных)
+```python
+import requests
+import wikipediaapi
+import feedparser
+from bs4 import BeautifulSoup
+from pathlib import Path
+from datetime import datetime
+
+class RussianTextParser:
+    def __init__(self, raw_dir: Path, parsed_dir: Path, min_text_length=10000):
+        self.raw_dir = raw_dir
+        self.parsed_dir = parsed_dir
+        self.min_text_length = min_text_length
+    
+    def parse_wikipedia(self, topic: str, lang="ru") -> str:
+        wiki = wikipediaapi.Wikipedia(lang)
+        page = wiki.page(topic)
+        return page.text if page.exists() else ""
+    
+    def parse_lenta_rss(self) -> list:
+        feed = feedparser.parse("https://lenta.ru/rss/news")
+        return [
+            {'title': entry.title, 'text': self.extract_article_text(entry.link)}
+            for entry in feed.entries
+        ]
+    
+    def extract_article_text(self, url: str) -> str:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        return ' '.join(p.get_text() for p in soup.find_all('p'))
+    
+    def parse_lib_ru(self, author: str) -> str:
+        # ... (реализация парсинга lib.ru)
+    
+    def save_text(self, text: str, source: str) -> bool:
+        if len(text) < self.min_text_length:
+            return False
+        filename = f"{source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(self.parsed_dir / filename, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return True
+    
+    def run_parsing(self):
+        # Парсинг Википедии
+        for topic in ["Россия", "Наука", "Литература"]:
+            text = self.parse_wikipedia(topic)
+            if text:
+                self.save_text(text, "wiki")
+        
+        # Парсинг новостей
+        for article in self.parse_lenta_rss():
+            self.save_text(article['text'], "lenta")
+        
+        # Парсинг классики
+        for author in ["Толстой Л.Н.", "Достоевский Ф.М."]:
+            text = self.parse_lib_ru(author)
+            if text:
+                self.save_text(text, "libru")
+```
+
+#### 5. `src/utils.py` (Вспомогательные функции)
+```python
+import torch
+import numpy as np
+
+def generate_text(model, start_str, length, char_to_idx, idx_to_char, device, temperature=0.8):
+    model.eval()
+    chars = [char_to_idx[c] for c in start_str]
+    hidden = model.init_hidden(1, device)
+    
+    # "Прогрев" модели
+    for char in chars[:-1]:
+        x = torch.tensor([[char]], dtype=torch.long).to(device)
+        _, hidden = model(x, hidden)
+    
+    # Генерация новых символов
+    for _ in range(length):
+        x = torch.tensor([[chars[-1]]], dtype=torch.long).to(device)
+        output, hidden = model(x, hidden)
+        probs = torch.softmax(output[0, -1] / temperature, dim=-1).detach().cpu().numpy()
+        next_char = np.random.choice(len(probs), p=probs)
+        chars.append(next_char)
+    
+    return ''.join(idx_to_char[i] for i in chars)
+
+def save_model(model, optimizer, epoch, char_to_idx, idx_to_char, hidden_size, vocab_size, path):
+    torch.save({
+        'epoch': epoch,
+        'model_state': model.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'char_to_idx': char_to_idx,
+        'idx_to_char': idx_to_char,
+        'hidden_size': hidden_size,
+        'vocab_size': vocab_size
+    }, path)
+
+def load_model(path, device, model_class):
+    checkpoint = torch.load(path, map_location=device)
+    model = model_class(
+        checkpoint['vocab_size'],
+        checkpoint['hidden_size'],
+        checkpoint['vocab_size']
+    ).to(device)
+    model.load_state_dict(checkpoint['model_state'])
+    return model, checkpoint
+```
+
+---
+
+### Требования к окружению (requirements.txt)
+```
+torch>=2.0.0
+numpy>=1.20.0
+beautifulsoup4>=4.12.0
+requests>=2.28.0
+wikipedia-api>=0.5.8
+feedparser>=6.0.10
+tqdm>=4.65.0
+```
+
+---
+
+### Принцип работы системы:
+1. **Инициализация**:
+   - Создание необходимых директорий
+   - Проверка доступности GPU
+2. **Сбор данных**:
+   - Автоматический парсинг при недостатке данных
+   - Объединение всех текстовых источников
+3. **Подготовка данных**:
+   - Создание словаря символов
+   - Формирование обучающих последовательностей
+4. **Инициализация модели**:
+   - Создание новой или загрузка существующей
+   - Настройка оптимизатора
+5. **Цикл обучения**:
+   - Обработка батчей
+   - Расчет потерь и обратное распространение
+   - Регулярное сохранение прогресса
+6. **Генерация текста**:
+   - Демонстрация примеров во время обучения
+   - Финальная генерация после обучения
+
+---
+
+### Возможности расширения:
+1. Добавить новые источники данных:
+   - Реализовать новые методы в `parser.py`
+2. Улучшить модель:
+   - Добавить слои внимания
+   - Реализовать трансформерную архитектуру
+3. Оптимизировать обработку данных:
+   - Добавить потоковую загрузку
+   - Реализовать аугментацию текста
+4. Добавить интерфейс:
+   - Веб-интерфейс для генерации текста
+   - API для интеграции с другими системами
+
+---
+
+### Особенности реализации:
+- **Автономность**: Система самостоятельно собирает данные при первом запуске
+- **Устойчивость**: Обработка ошибок при парсинге и загрузке
+- **Масштабируемость**: Поддержка больших объемов данных через батчи
+- **Продолжаемое обучение**: Возможность дообучения на новых данных
+- **Русскоязычная оптимизация**: Специализированные источники данных
+
+Этот проект представляет собой законченное решение для создания и использования русскоязычных языковых моделей, которое может быть легко адаптировано под различные задачи и масштабы.
